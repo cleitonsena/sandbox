@@ -1,86 +1,219 @@
 # Coloring Book Factory
 
-A small, mostly autonomous pipeline that researches, draws, reviews and packages adult coloring books, with a human approving every step that costs money or goes public.
+A mostly autonomous pipeline that researches the market, draws, reviews and packages adult coloring books. AI agents do the work; a human approves every step that spends money or goes public. It runs on a spare MacBook Air, every 30 minutes, with no server and no cloud bill.
 
-It produced its first book, **Cozy Little Corners** (Toffee Tabby collection): 50 bold and easy pages, a print-on-demand paperback kit, a printable PDF and a free 5-page sample.
+> **Source-available, not open source.** Free for personal and noncommercial use under the [PolyForm Noncommercial License 1.0.0](LICENSE). Want to use it commercially, or have a pipeline like this built for you? See [Work with me](#work-with-me).
 
-- Printable book: https://cleitonsenaa.gumroad.com/l/cozy-coloring-book-printable
-- Free sample: https://cleitonsenaa.gumroad.com/l/free-cozy-coloring-pages
+## At a glance
 
-> Source-available, **not open source**. Free for personal and noncommercial use under the PolyForm Noncommercial License 1.0.0. For commercial use, or to have something like this built for you, see [Commercial use and collaboration](#commercial-use-and-collaboration).
+| | |
+|---|---|
+| **Input** | A one-line book idea (theme, audience, page count) dropped in a queue |
+| **Output** | A print-ready paperback kit (interior + cover PDFs), a printable Letter PDF, a free 5-page sample, listing copy, and, through a separate script, an Etsy listing draft |
+| **Agents** | Market analyst, editor (brief and listing), page checker, whole-book reviewer, retro coach |
+| **Human gates** | Brief, failed pages, price, final review, spend caps, upload |
+| **Cost per book** | About USD 0.02 per page image and USD 0.06 per cover image, plus market data; the language-model agents run on a flat subscription |
+| **Spend caps** | USD 2 per book and USD 10 per month without asking |
 
-## What it does
+> **Status (November 2026):** first book shipped. *Cozy Little Corners* (50 bold and easy pages, Toffee Tabby collection) is live on Gumroad as a [printable book](https://cleitonsenaa.gumroad.com/l/cozy-coloring-book-printable) and a [free sample](https://cleitonsenaa.gumroad.com/l/free-cozy-coloring-pages). The Etsy listing is a draft and the paperback kit is ready for upload, both waiting on the human.
 
-One queue, one loop. A launchd job runs `bin/fabrica.py` every 30 minutes on a spare MacBook Air. Each task in the queue moves forward until it either finishes or reaches a **human gate**, then it waits.
+## Pipeline
+
+| Step | Stage | What it does | Code |
+|---|---|---|---|
+| 1 | **Benchmark** | Pulls competitor coloring books (price, rating, reviews, sales rank, monthly buys). Proposes a price below the median that still pays back the production cost on the first sale. A market-analyst agent turns the data into themes, cover direction and page style | `fabrica.py`, `benchmark`, `preco_abaixo`, `mercado_amazon*.py` |
+| 2 | **Brief** | The editor agent writes the title, page list and cover texts from the benchmark and the lessons of earlier books. Needs a human yes and a brand name | `fabrica.py` |
+| 3 | **Pages** | Each page is generated, auto-checked, then judged by a reviewer agent that sees the image. Failures are redrawn up to 3 times, then go to a human queue | `linha.py`, `gerar_imagem.py` |
+| 4 | **Interior** | Approved pages upscaled to 300 dpi line art and assembled into the paperback interior | `montar.py` |
+| 5 | **Cover** | Cover art generated, then title, subtitle and spine laid out to the print spec (bleed, spine width per page count, safe zones) | `capa_final.py`, `montar.py` |
+| 6 | **Listing** | The editor agent writes the title, subtitle, description, keywords and categories, with AI disclosure | `fabrica.py` |
+| 7 | **Whole-book review** | A reviewer agent sees every page, the cover and the listing at once and sends weak pages back, once | `fabrica.py` |
+| 8 | **Archive** | Finished book copied to a folder of ready books | `fabrica.py` |
+| 9 | **Kit** | Upload checklist, printable PDF and free sample | `fabrica.py`, `imprimivel.py` |
+| 10 | **Retro** | Cost per approved page and first-pass approval rate, compared with earlier books. A retro agent writes lessons that feed the next brief | `fabrica.py`, `retro`, `metricas` |
+| 11 | **Reporting** | Uploads the files to Google Drive and rebuilds a spreadsheet with one column per book: costs, price, net per sale, payback | `fabrica.py`, `planilha.py`, `gsheets.py` |
+| ✋ | **Upload** | The human uploads to the marketplace. The factory never publishes | human |
+
+A second task type, **research**, studies a niche (keywords → market data → analyst verdict with a confidence score) and stops at a "do we enter?" gate.
+
+## Architecture
+
+```mermaid
+flowchart TD
+    subgraph "Trigger"
+        T1["⏰ launchd<br/>every 30 min"]
+        T2["🖱️ manual run<br/>fabrica.py"]
+    end
+
+    subgraph "Queue and state"
+        Q[(queue<br/>one JSON per task)]
+        AP[(approvals.json<br/>written by the human)]
+        G[(costs log<br/>spend caps)]
+    end
+
+    subgraph "Stages"
+        S0[BENCHMARK<br/>market data + price]
+        S1[BRIEF<br/>agent]
+        S2[PAGES<br/>generate → check → review]
+        S3[INTERIOR + COVER<br/>print-spec PDFs]
+        S4[LISTING<br/>agent]
+        S5[WHOLE-BOOK REVIEW<br/>agent]
+        S6[KIT + RETRO<br/>PDFs, sample, metrics]
+        S7[REPORTING<br/>Drive + spreadsheet]
+    end
+
+    subgraph "External services"
+        IMG[OpenAI Images<br/>gpt-image-2]
+        CDX[Codex CLI<br/>read-only agents]
+        APF[Apify<br/>market data]
+        GD[Google Drive<br/>+ Sheets]
+    end
+
+    H((👤 Human))
+
+    T1 & T2 --> Q
+    Q --> S0 --> S1 --> S2 --> S3 --> S4 --> S5 --> S6 --> S7
+
+    S0 --> APF
+    S0 & S1 & S4 & S5 & S6 --> CDX
+    S2 --> IMG
+    S2 --> CDX
+    S3 --> IMG
+    S7 --> GD
+
+    S0 & S1 & S2 & S3 & S5 -->|log spend| G
+    G -.->|cap reached| H
+    S1 & S2 & S4 & S5 & S6 -.->|gate| H
+    H -->|approve| AP
+    AP -.->|unblocks next run| Q
+
+    classDef store fill:#a5d6a7,stroke:#1b5e20,color:#0d2818,stroke-width:2px
+    classDef api fill:#ffcc80,stroke:#bf360c,color:#3e2723,stroke-width:2px
+    classDef stage fill:#90caf9,stroke:#0d47a1,color:#0d2245,stroke-width:2px
+    classDef trigger fill:#ce93d8,stroke:#4a148c,color:#2d0844,stroke-width:2px
+    classDef human fill:#fff59d,stroke:#f57f17,color:#3e2700,stroke-width:2px
+    class Q,AP,G store
+    class IMG,CDX,APF,GD api
+    class S0,S1,S2,S3,S4,S5,S6,S7 stage
+    class T1,T2 trigger
+    class H human
+```
+
+## State machines
+
+**Task** (one file in the queue). Every run picks up where the last one stopped.
 
 ```
-benchmark  ->  brief  -> [gate: brief]  ->  pages  -> [gate: failed pages]
-   ->  interior PDF  ->  cover  ->  listing copy  ->  whole-book review
-   ->  archive  ->  upload kit  ->  retro  ->  Drive + spreadsheet  -> [gate: human upload]  ->  done
+            ┌──────────── human approves in approvals.json ────────────┐
+            ▼                                                          │
+queued ──► running ──┬──► gate (waiting on human) ─────────────────────┘
+                     ├──► error (shown to the human; other tasks keep going)
+                     └──► done
 ```
 
-| Step | What happens | Code |
+**Page** (one entry in the book's `estado.json`)
+
+```
+pending ──► generated ──► auto-check ──┬──► reviewer agent ──┬──► approved ──► upscaled to 300 dpi
+                ▲                       │                     │
+                └──── redraw (max 3) ───┴─────── fail ────────┘
+                                                  │
+                                         3rd fail ▼
+                                            human queue
+```
+
+**Human gates**
+
+| Gate | Fires when | Human decides |
 |---|---|---|
-| Benchmark | Pulls competitor coloring books (price, rating, reviews, sales rank) and proposes a price below the median that still pays back the production cost | `fabrica.py` (`benchmark`, `preco_abaixo`), `mercado_amazon*.py` |
-| Brief | An agent writes the page list and the style prompt | `fabrica.py` |
-| Pages | Each page is generated, auto-checked (margins, grey, ink coverage) and judged by a reviewer agent that looks at the image; failures are redrawn up to 3 times, then go to a human queue. Approved pages are upscaled to 300 dpi line art | `linha.py`, `gerar_imagem.py` |
-| Interior and cover | Print-ready PDFs that follow the print-on-demand spec (trim, bleed, spine width per page count, safe zones) | `montar.py`, `capa_final.py` |
-| Whole-book review | A reviewer agent sees every page, the cover and the listing at once and sends weak pages back, once | `fabrica.py` |
-| Kit | Upload kit, printable Letter PDF, free sample, listing copy | `imprimivel.py`, `fabrica.py` |
-| Retro | Cost per approved page, first-pass approval rate, lessons that feed the next brief | `fabrica.py` (`retro`, `metricas`) |
-| Reporting | Uploads files to Google Drive and rebuilds a one-column-per-book spreadsheet (costs, price, net per sale, payback) | `fabrica.py` (`drive_e_planilha`), `planilha.py`, `gsheets.py` |
-| Marketplace draft | Creates an Etsy listing **draft** through the Etsy Open API v3; it has no call that publishes | `etsy_rascunho.py` |
-
-`experiments/` holds the throwaway scripts used to choose the cover design and typography (proof sheets).
+| `brief` | The brief is written | Approve or edit the page list, set the brand name |
+| `teto_livro` / `teto_mes` | Next step would pass USD 2 per book or USD 10 per month | Allow the spend or stop |
+| `paginas_falhadas` | Pages failed 3 times | Redraw, drop or accept |
+| `preco` | No price under the competitor median pays back the production cost | Pick a price or drop the book |
+| `revisao_final` | Whole-book reviewer scores the book below the bar | Fix or accept |
+| `upload` | Kit is ready | Review and upload to the marketplace |
+| `decidir` | A niche research task is done | Enter the niche or not |
 
 ## Rules the bots never break
 
-These are enforced in code and in the agent prompts:
+1. **Never** create accounts, pay, publish or contact anyone. Those are human actions.
+2. **Never** read, write or ask for passwords or keys. Keys live outside the repo (`chmod 600` files or the OS keychain) and are never printed.
+3. **Never** browse or scrape the marketplace directly. Market data comes from a third-party data provider.
+4. **Never** invent a number. Every figure has a source link or is labelled as an estimate.
+5. **Never** pass the spend caps without a human yes.
 
-1. Never create accounts, pay, publish or contact anyone. Those are human actions.
-2. Never read, write or ask for passwords or keys. Keys live in files outside the repo (`chmod 600`) or the OS keychain and are never printed.
-3. Never browse or scrape the marketplace directly. Market data comes from a third-party data provider.
-4. Never invent a number. Every figure has a source link or is labelled as an estimate.
-5. Hard spend caps: USD 2 per book and USD 10 per month without asking.
+## Repo structure
 
-## Numbers from the first book
-
-Measured on Cozy Little Corners, November 2026: image generation about USD 0.02 per page and USD 0.06 per cover, market data about USD 0.006 per competitor book. The language-model agents run on a flat subscription, so they add no per-call cost.
-
-## Stack
-
-- Python 3 standard library plus Pillow
-- OpenAI Images API (`gpt-image-2`) for pages and cover art
-- Codex CLI in read-only mode for the brief, reviewer and copy agents, with JSON-schema outputs
-- Apify actors for marketplace data
-- rclone + Google Sheets API for Drive and the reporting sheet
-- Etsy Open API v3 (OAuth 2.0 with PKCE) for listing drafts
-- macOS launchd for scheduling
+```
+coloring-book-factory/
+├── bin/
+│   ├── fabrica.py           # orchestrator: queue, stages, gates, spend caps, reports
+│   ├── linha.py             # page line: generate → auto-check → reviewer agent → redraw
+│   ├── gerar_imagem.py      # OpenAI Images API, one page
+│   ├── editar_imagem.py     # OpenAI Images API, edit or extend an image
+│   ├── montar.py            # paperback interior + cover PDFs (trim, bleed, spine)
+│   ├── capa_final.py        # cover typography and layout
+│   ├── imprimivel.py        # printable Letter PDF and free sample
+│   ├── mercado_amazon.py    # market data via Apify (niche analyzer actor)
+│   ├── mercado_amazon2.py   # market data via Apify (sales rank, monthly buys)
+│   ├── planilha.py          # one-column-per-book reporting sheet
+│   ├── gsheets.py           # Google Sheets access through the rclone token
+│   └── etsy_rascunho.py     # Etsy listing DRAFT (OAuth 2.0 + PKCE); no publish call
+├── experiments/             # throwaway proof sheets used to pick the cover and fonts
+├── examples/
+│   └── livro-modelo.json    # book template: style prompt, pages, copyright
+├── launchd/
+│   └── com.example.fabrica.plist   # runs the factory every 30 min
+├── LICENSE                  # PolyForm Noncommercial 1.0.0
+└── README.md
+```
 
 Code comments and agent prompts are in Portuguese.
 
-## Running it
+## Stack
 
-This is a working personal setup, not a packaged tool. Paths assume `~/livros` (books and `bin/`) and `~/empresa` (queue, decisions, costs, `config.json`).
+| Layer | Tool |
+|---|---|
+| Language | Python 3 standard library + Pillow |
+| Images | OpenAI Images API (`gpt-image-2`) |
+| Agents | Codex CLI in read-only mode, JSON-schema outputs |
+| Market data | Apify actors |
+| Files and reporting | rclone + Google Drive + Google Sheets API |
+| Marketplace draft | Etsy Open API v3 |
+| Scheduling | macOS launchd |
 
-1. `pip install pillow`, install the Codex CLI and rclone.
-2. Put your keys where the scripts expect them (see each script's docstring): `~/.openai-imagens`, `~/.apify-pessoal`, an rclone remote named `pessoal`.
-3. Copy `examples/livro-modelo.json` into `~/livros/<book>/livro.json` and add a task to `~/empresa/fila/`, for example `{"tipo": "livro", "pasta": "~/livros/<book>"}`.
-4. Run `python3 bin/fabrica.py` once, or load `launchd/com.example.fabrica.plist` (replace `YOU` with your user).
-5. Approve gates by writing `aprovacoes.json` in the book folder.
+## Local run
 
-## Commercial use and collaboration
+This is a working personal setup, not a packaged tool. Paths assume `~/livros` (books and `bin/`) and `~/empresa` (queue, costs, `config.json`).
+
+```bash
+pip install pillow            # plus the Codex CLI and rclone
+
+# keys live outside the repo, one per file, chmod 600 (see each script's docstring)
+#   ~/.openai-imagens   ~/.apify-pessoal   rclone remote "pessoal"
+
+mkdir -p ~/livros/my-book ~/empresa/fila
+cp examples/livro-modelo.json ~/livros/my-book/livro.json
+echo '{"tipo": "livro", "pasta": "~/livros/my-book"}' > ~/empresa/fila/001-my-book.json
+
+python3 bin/fabrica.py        # one pass: runs until done or a gate
+python3 bin/linha.py ~/livros/my-book      # just the page line for one book
+python3 bin/montar.py interior ~/livros/my-book
+python3 bin/imprimivel.py ~/livros/my-book --amostra 5   # free sample
+```
+
+Approve a gate by adding its key to `~/livros/my-book/aprovacoes.json`, for example `{"brief": true}`. To run it on a schedule, copy `launchd/com.example.fabrica.plist` to `~/Library/LaunchAgents/`, replace `YOU` with your user, and load it.
+
+## Work with me
 
 The license allows personal use, study, hobby projects and use by noncommercial organizations. Any commercial use needs a separate paid license.
 
-If you want to use this commercially, collaborate, or have a similar pipeline built for your business, reach out:
+If you want to use this commercially, collaborate, or have a similar pipeline built for your business:
 
-- LinkedIn: https://www.linkedin.com/in/cleiton-sena/
-- GitHub: https://github.com/cleitonsena
-- DEV: https://dev.to/cleitonsena
-- X: https://x.com/cleitonsenaes
-- Instagram: https://www.instagram.com/cleitonsenaes/
+[LinkedIn](https://www.linkedin.com/in/cleiton-sena/) | [GitHub](https://github.com/cleitonsena) | [DEV](https://dev.to/cleitonsena) | [X](https://x.com/cleitonsenaes) | [Instagram](https://www.instagram.com/cleitonsenaes/)
 
 ## License
 
-[PolyForm Noncommercial License 1.0.0](LICENSE). Required Notice: Copyright 2026 Cleiton Sena (https://github.com/cleitonsena)
+[PolyForm Noncommercial License 1.0.0](LICENSE)
+
+Required Notice: Copyright 2026 Cleiton Sena (https://github.com/cleitonsena)

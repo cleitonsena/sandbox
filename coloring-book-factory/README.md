@@ -40,64 +40,38 @@ A second task type, **research**, studies a niche (keywords → market data → 
 
 ```mermaid
 flowchart TD
-    subgraph "Trigger"
-        T1["⏰ launchd<br/>every 30 min"]
-        T2["🖱️ manual run<br/>fabrica.py"]
+    T["⏰ launchd<br/>every 30 min"] --> Q[("queue<br/>one JSON per task")]
+
+    subgraph BOOK ["One book, start to finish"]
+        direction TB
+        S1["1 BENCHMARK<br/>Apify data + analyst agent"]
+        S2["2 BRIEF<br/>editor agent"]
+        S3["3 PAGES<br/>gpt-image-2 + checker agent"]
+        S4["4-5 INTERIOR + COVER<br/>print-spec PDFs"]
+        S5["6 LISTING<br/>editor agent"]
+        S6["7 WHOLE-BOOK REVIEW<br/>reviewer agent"]
+        S7["8-10 ARCHIVE, KIT, RETRO<br/>PDFs, sample, lessons"]
+        S8["11 REPORTING<br/>Google Drive + Sheets"]
+        S1 --> S2 --> S3 --> S4 --> S5 --> S6 --> S7 --> S8
     end
 
-    subgraph "Queue and state"
-        Q[(queue<br/>one JSON per task)]
-        AP[(approvals.json<br/>written by the human)]
-        G[(costs log<br/>spend caps)]
-    end
+    Q --> S1
+    S8 --> U["✋ UPLOAD<br/>done by the human"]
 
-    subgraph "Stages"
-        S0[BENCHMARK<br/>market data + price]
-        S1[BRIEF<br/>agent]
-        S2[PAGES<br/>generate → check → review]
-        S3[INTERIOR + COVER<br/>print-spec PDFs]
-        S4[LISTING<br/>agent]
-        S5[WHOLE-BOOK REVIEW<br/>agent]
-        S6[KIT + RETRO<br/>PDFs, sample, metrics]
-        S7[REPORTING<br/>Drive + spreadsheet]
-    end
-
-    subgraph "External services"
-        IMG[OpenAI Images<br/>gpt-image-2]
-        CDX[Codex CLI<br/>read-only agents]
-        APF[Apify<br/>market data]
-        GD[Google Drive<br/>+ Sheets]
-    end
-
-    H((👤 Human))
-
-    T1 & T2 --> Q
-    Q --> S0 --> S1 --> S2 --> S3 --> S4 --> S5 --> S6 --> S7
-
-    S0 --> APF
-    S0 & S1 & S4 & S5 & S6 --> CDX
-    S2 --> IMG
-    S2 --> CDX
-    S3 --> IMG
-    S7 --> GD
-
-    S0 & S1 & S2 & S3 & S5 -->|log spend| G
-    G -.->|cap reached| H
-    S1 & S2 & S4 & S5 & S6 -.->|gate| H
-    H -->|approve| AP
-    AP -.->|unblocks next run| Q
+    BOOK -. "gate: needs a yes" .-> H(("👤 Human"))
+    H -- "approvals.json" --> Q
 
     classDef store fill:#a5d6a7,stroke:#1b5e20,color:#0d2818,stroke-width:2px
-    classDef api fill:#ffcc80,stroke:#bf360c,color:#3e2723,stroke-width:2px
     classDef stage fill:#90caf9,stroke:#0d47a1,color:#0d2245,stroke-width:2px
     classDef trigger fill:#ce93d8,stroke:#4a148c,color:#2d0844,stroke-width:2px
     classDef human fill:#fff59d,stroke:#f57f17,color:#3e2700,stroke-width:2px
-    class Q,AP,G store
-    class IMG,CDX,APF,GD api
-    class S0,S1,S2,S3,S4,S5,S6,S7 stage
-    class T1,T2 trigger
-    class H human
+    class Q store
+    class S1,S2,S3,S4,S5,S6,S7,S8 stage
+    class T trigger
+    class H,U human
 ```
+
+Each run moves every task forward until it finishes or stops at a gate. When the human approves, the next run continues from that point. Every paid call is logged against the spend caps, and passing a cap is itself a gate.
 
 ## State machines
 

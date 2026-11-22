@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Acesso a Google Sheets com o token do remote rclone 'pessoal' (scope drive).
-Nunca imprime tokens nem segredos."""
+"""Google Sheets access with the token of the rclone remote 'personal' (drive scope).
+Never prints tokens or secrets."""
 import configparser, json, subprocess, sys, urllib.parse, urllib.request, os
 
 RCLONE = os.path.expanduser("~/.local/bin/rclone")
@@ -8,7 +8,7 @@ RCLONE = os.path.expanduser("~/.local/bin/rclone")
 def token():
     path = subprocess.run([RCLONE, "config", "file"], capture_output=True, text=True).stdout.strip().splitlines()[-1]
     c = configparser.ConfigParser(); c.read(path)
-    s = c["pessoal"]
+    s = c["personal"]
     tok = json.loads(s["token"])
     data = urllib.parse.urlencode({"client_id": s["client_id"], "client_secret": s["client_secret"],
                                    "refresh_token": tok["refresh_token"], "grant_type": "refresh_token"}).encode()

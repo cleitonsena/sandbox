@@ -1,0 +1,60 @@
+{
+ "titulo_provisorio": "Piloto cozy bold and easy",
+ "tamanho": "1024x1024",
+ "estilo": "Black and white line art coloring page for adults in a cozy, bold and easy style: {tema}. Thick bold black outlines of even weight, pure white background, no shading, no hatching, no gray, no color, no text. Large simple closed shapes with generous open spaces to color, few small details. The whole drawing sits inside the page with a clear white margin on every side; nothing is cut off by the edges. Plain white paper, no border, no frame.",
+ "paginas": [
+  {
+   "id": "p01",
+   "tema": "a cozy reading nook with a big armchair, a sleeping cat, a floor lamp and a stack of books"
+  },
+  {
+   "id": "p02",
+   "tema": "a small cafe counter with cakes under glass domes, coffee cups and a teapot"
+  },
+  {
+   "id": "p03",
+   "tema": "a kitchen windowsill with a teapot, potted herbs and a jar of cookies"
+  },
+  {
+   "id": "p04",
+   "tema": "a bedroom corner with a knitted blanket, fluffy pillows and string lights"
+  },
+  {
+   "id": "p05",
+   "tema": "a front porch with a rocking chair, pumpkins and potted plants"
+  }
+ ],
+ "titulo": "Cozy Little Corners",
+ "subtitulo": "Bold & Easy Coloring Book for Adults",
+ "marca": "[MARCA A DEFINIR]",
+ "copyright": [
+  "Copyright 2026 [MARCA A DEFINIR]. All rights reserved.",
+  "No part of this book may be reproduced without written permission from the publisher.",
+  "Tip: place a sheet of paper behind the page you are coloring. Each design is printed on one side only."
+ ],
+ "contracapa": [
+  "Slow down and color your way through warm, cozy little corners.",
+  "Bold lines and big, simple shapes make every page relaxing and easy to finish with markers, pencils or gel pens.",
+  "Single-sided pages. 50 cozy designs."
+ ],
+ "cor_fundo": [
+  247,
+  236,
+  220
+ ],
+ "cor_texto": [
+  92,
+  58,
+  40
+ ],
+ "cor_lombada": [
+  196,
+  120,
+  86
+ ],
+ "cor_texto_lombada": [
+  255,
+  248,
+  240
+ ]
+}

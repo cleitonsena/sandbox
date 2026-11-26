@@ -68,7 +68,8 @@ def approved():
     for pg in book["pages"]:
         st = state.get(pg["id"], {})
         if st.get("state") == "approved":
-            out.append(st["attempts"][-1]["file"])
+            # image bank pages (decision 0024) have no attempts: use the copy in final/
+            out.append(st["attempts"][-1]["file"] if st.get("attempts") else os.path.join(folder, "final", pg["id"] + ".png"))
     return out
 
 

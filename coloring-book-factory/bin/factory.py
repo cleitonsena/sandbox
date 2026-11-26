@@ -868,8 +868,9 @@ def book(t, name):
         log(name, "cover picked in the storefront", best["id"], best["storefront_score"])
     if not os.path.exists(f"{folder}/kit/cover.pdf") or os.path.getmtime(f"{folder}/kit/cover.pdf") < os.path.getmtime(f"{folder}/kit/interior.pdf"):
         log(name, "cover")
-        approved = [st[p["id"]]["attempts"][-1]["file"] for p in L["pages"]
-                    if st.get(p["id"], {}).get("state") == "approved"]
+        # image bank pages (decision 0024) have no attempts: use the copy in final/
+        approved = [(st[p["id"]]["attempts"] or [{"file": f"{folder}/final/{p['id']}.png"}])[-1]["file"]
+                    for p in L["pages"] if st.get(p["id"], {}).get("state") == "approved"]
         r = run([PY, f"{BIN}/final_cover.py", f"{BOOKS}/fonts", art, str(n_int), f"{folder}/kit/cover"] + approved[:4],
                 extra={"BOOK_JSON": f"{folder}/book.json"})
         if r.returncode:

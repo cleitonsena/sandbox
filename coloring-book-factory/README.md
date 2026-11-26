@@ -155,6 +155,8 @@ coloring-book-factory/
 │   ├── watchdog.py          # no-AI health checks and alerts
 │   ├── spreadsheet.py       # one-row-per-book reporting sheet
 │   └── gsheets.py           # Google Sheets access through the rclone token
+├── docs/
+│   └── pinterest-standard-access.md   # how to record the OAuth demo video for Standard access
 ├── experiments/             # throwaway proof sheets used to pick the cover and fonts
 ├── examples/
 │   └── book-template.json   # book template: style prompt, pages, copyright

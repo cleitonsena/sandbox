@@ -32,7 +32,8 @@ for t in lines:
 pages.append(pg)
 # 3. designs, 1 per page, centered (in the sample: N spread across the book)
 approved = [p for p in L["pages"] if st.get(p["id"], {}).get("state") == "approved"]
-if SAMPLE:
+if SAMPLE:  # decision 0024: pages taken from the image bank never go into the free sample
+    approved = [p for p in approved if not p.get("origin")] or approved
     approved = [approved[round(i * (len(approved) - 1) / max(1, SAMPLE - 1))] for i in range(min(SAMPLE, len(approved)))]
 for p in approved:
     im = Image.open(f"{folder}/final/{p['id']}.png").convert("L")

@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Book factory (decision 0010). Runs on the Air, on its own, from the queue in ~/company/queue/.
 
-Usage: factory.py            -> processes the queue until each task reaches a human gate or finishes
-       factory.py --status   -> only rewrites the report and the decisions inbox
+Usage: factory.py                        -> processes the queue until each task reaches a human gate or finishes
+       factory.py --status               -> only rewrites the report and the decisions inbox
+       factory.py --no-book-of-the-day   -> runs without creating the book of the day
+       factory.py --week                 -> forces the weekly review today
 
 Tasks (one .json per task in ~/company/queue/, processed in name order):
   {"type": "book", "folder": "~/books/book-02"}           (folder has book.json with "request")
@@ -11,7 +13,9 @@ Book phases: benchmark (covers, drawings, price) -> brief -> [gate: brief] -> pa
 -> listing -> review of the whole book (redoes pages once on its own) -> archive in ~/Finished-Books
 -> kit -> retro (sprint review) -> [gate: human upload] -> done.
 Human approvals: <folder>/approvals.json (written on the main Mac after the board decides).
-Caps without asking: US$ 2 per book, US$ 10 per month (images + Apify).
+Caps without asking: US$ 2 per book, EUR 10 per month (images + Apify), converted at the ECB rate.
+Book of the day (Cleiton's rule, 23 Nov 2026): 1 new book per day while the month is below the cap;
+at the cap the factory stops and asks whether to go on (gate month_cap_YYYY-MM in ~/company/approvals.json).
 Never publishes, never opens Amazon, never creates accounts, never pays.
 """
 import datetime, glob, json, math, os, shutil, statistics, subprocess, sys, time
@@ -20,14 +24,17 @@ H = os.path.expanduser
 COMPANY, BOOKS, BIN = H("~/company"), H("~/books"), H("~/books/bin")
 QUEUE, PENDING, REPORT = f"{COMPANY}/queue", f"{COMPANY}/decisions/pending.md", f"{COMPANY}/reports/factory.md"
 SPEND = f"{COMPANY}/spend.jsonl"
-BOOK_CAP, MONTH_CAP = 2.0, 10.0
+BOOK_CAP, MONTH_CAP = 2.0, 10.0  # MONTH_CAP in USD, recalculated in main() from MONTH_CAP_EUR
+MONTH_CAP_EUR = 10.0  # Cleiton's rule, 23 Nov 2026: SPEND cap per month; at the cap it asks whether to go on
+USD_CAP_BY_MONTH = {"2026-12": 30.0}  # Cleiton, 25 Nov 2026: December with 1 book per day until 23 Dec, cap US$ 30
+MAX_BRIEFS_WAITING = 3  # no book of the day if 3 books of the day already wait at the brief gate
 # Pricing rule (decision 0012). The board changes it in ~/company/config.json.
 # us_withholding: KDP withholds 30% at source without a W-8BEN; the US-Spain treaty art. 12 limits it to 5% (literary/artistic copyright).
 #   Whether KDP applies 5% to coloring books: NOT VERIFIED.
 # estimated_irpf: IRPF in Spain falls on profit (sales minus expenses), not on each sale. Marginal rate NOT VERIFIED (accountant).
 US_WITHHOLDING, ESTIMATED_IRPF = 0.05, 0.30
-LESSONS, IMPROVEMENTS, CONFIG = f"{BOOKS}/lessons.md", f"{COMPANY}/improvements.md", f"{COMPANY}/config.json"
-IMG_COST, COVER_COST, APIFY_COST_PER_BOOK = 0.02, 0.06, 0.006  # measured 2026-11-21 (OpenAI balance, Apify run)
+LESSONS, IMPROVEMENTS, CONFIG = f"{COMPANY}/lessons.md", f"{COMPANY}/improvements.md", f"{COMPANY}/config.json"  # lessons in the brain (git) since 23 Nov 2026
+IMG_COST, COVER_COST, APIFY_COST_PER_BOOK = 0.0065, 0.06, 0.006  # IMG_COST: OpenAI invoice 25 Nov 2026 (US$ 1.10 / ~175 images), approved by Cleiton 25 Nov (rule 0016)
 ENV = dict(os.environ, PATH=f"/opt/homebrew/bin:{H('~/.local/bin')}:/usr/bin:/bin:/usr/sbin:/sbin")
 PY = sys.executable
 today = lambda: datetime.date.today().isoformat()
@@ -55,6 +62,24 @@ def spend(desc, usd):
         f.write(json.dumps({"date": today(), "desc": desc, "usd": round(usd, 4)}, ensure_ascii=False) + "\n")
 
 
+def apify_wait(cost):
+    """Watchdog rule (Cleiton, 23 Nov 2026): no Apify balance is not an error. The task waits for the cycle reset.
+    Returns the reason (text) if there is no balance for `cost`, otherwise None. Never prints the key."""
+    import urllib.request
+    try:
+        k = open(os.path.expanduser("~/.apify-personal")).read().strip()
+        req = urllib.request.Request("https://api.apify.com/v2/users/me/limits", headers={"Authorization": "Bearer " + k})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            d = json.load(r)["data"]
+        used, maximum = d["current"]["monthlyUsageUsd"], d["limits"]["maxMonthlyUsageUsd"]
+        if used + cost > maximum:
+            end = d["monthlyUsageCycle"]["endAt"][:10]
+            return f"Apify out of balance: US$ {used:.2f} of {maximum:.2f}; cycle ends {end} (UTC)"
+    except Exception as e:
+        log("apify", "could not read the balance, continuing", str(e)[:200])
+    return None
+
+
 def month_spend():
     m = today()[:7]
     tot = 0.0
@@ -66,16 +91,44 @@ def month_spend():
     return tot
 
 
+def usd_per_eur():
+    """ECB reference rate (1 EUR = x USD), once a day, saved in ~/company/exchange_rate.json.
+    Without a rate: uses the last saved one; without any, 1.0 (lower cap, safe side)."""
+    c = lj(f"{COMPANY}/exchange_rate.json", {}) or {}
+    if c.get("date") == today():
+        return c["usd_per_eur"]
+    try:
+        import re, urllib.request
+        x = urllib.request.urlopen("https://www.ecb.europa.eu/stats/eurofxref/eurofxref-daily.xml", timeout=20).read().decode()
+        v = float(re.search(r"currency='USD' rate='([0-9.]+)'", x).group(1))
+        sj(f"{COMPANY}/exchange_rate.json", {"date": today(), "usd_per_eur": v, "source": "ECB eurofxref-daily"})
+        return v
+    except Exception:
+        return c.get("usd_per_eur", 1.0)
+
+
+def cap_txt():
+    if USD_CAP_BY_MONTH.get(today()[:7]):
+        return f"US$ {MONTH_CAP:.2f} (special cap for this month)"
+    return f"EUR {MONTH_CAP_EUR:.0f} = US$ {MONTH_CAP:.2f}"
+
+
+def company_approvals():
+    return lj(f"{COMPANY}/approvals.json", {}) or {}
+
+
 def run(cmd, cwd=None, timeout=None, extra=None):
     return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout,
                           env=dict(ENV, **(extra or {})), stdin=subprocess.DEVNULL)
 
 
 def soul(name):
+    """Bot soul: first the OpenMausBot one, otherwise ~/books/souls/<Name>.md (factory-only bots)."""
     for b in lj(H("~/.openmausbot/bots.json"), []):
-        if b.get("name") == name:
-            return b.get("soul", "")
-    return ""
+        if b.get("name") == name and b.get("soul"):
+            return b["soul"]
+    f = f"{BOOKS}/souls/{name}.md"
+    return open(f).read().strip() if os.path.exists(f) else ""
 
 
 def codex(role, request, schema, cwd, out, images=()):
@@ -89,8 +142,42 @@ def codex(role, request, schema, cwd, out, images=()):
              "-o", out, text], cwd=cwd, timeout=1500)
     d = lj(out)
     if d is None:
+        d = gemini_fallback(role, text, f_schema, cwd, out, images, r.stderr[-400:])
+    if d is None:
         raise RuntimeError(f"{role} failed: {r.stderr[-400:]}")
     return d
+
+
+def gemini_fallback(role, text, f_schema, cwd, out, images, codex_error):
+    """Decision 0005 (23 Nov 2026): if Codex fails (quota or other error), the same request goes to free Gemini.
+    Only public factory data; zero cost, not recorded in the spend log."""
+    venv, gj_script = os.path.expanduser("~/.venv-genai/bin/python"), f"{BIN}/gemini_json.py"
+    if not (os.path.exists(venv) and os.path.exists(gj_script) and os.path.exists(os.path.expanduser("~/.gemini-personal"))):
+        return None
+    log(role, "codex failed, using the gemini fallback:", codex_error.strip().replace("\n", " ")[-200:])
+    f_req = out + ".request.txt"
+    open(f_req, "w").write(text)
+    img = [a for f in images for a in ("--img", f)]
+    r = run([venv, "-I", "-W", "ignore", gj_script, "--request", f_req, "--schema", f_schema, "--output", out, "--cwd", cwd] + img,
+            cwd="/tmp", timeout=600)
+    d = lj(out)
+    log(role, "gemini fallback", "ok " + r.stdout.strip()[-200:] if d is not None else "failed: " + r.stderr.strip()[-300:])
+    return d
+
+
+def serpapi_fallback(name, kws, n, reason):
+    """Amazon data fallback (Cleiton, 24 Nov 2026): with no Apify balance, tries free SerpApi (250/month, fixed limit).
+    At most 12 books per keyword, to save searches. Returns the script info or None (then it waits)."""
+    if not os.path.exists(os.path.expanduser("~/.serpapi")):
+        return None
+    log(name, "apify out of balance, using the serpapi fallback:", reason)
+    r = run([PY, f"{BIN}/market_serpapi.py"] + list(kws), timeout=2400, extra={"BOOKS_PER_KW": str(min(n, 12))})
+    last = (r.stdout.strip().splitlines() or [""])[-1]
+    if r.returncode:
+        log(name, "serpapi fallback failed", (last + " " + r.stderr.strip())[-300:])
+        return None
+    log(name, "serpapi fallback ok", last[-200:])
+    return json.loads(last)
 
 
 def gate(task, key, text, files=()):
@@ -99,10 +186,11 @@ def gate(task, key, text, files=()):
 
 # ----------------------------------------------------------------- book
 SCHEMA_BRIEF = {"type": "object", "additionalProperties": False,
-                "required": ["title", "subtitle", "cover", "themes", "rationale"],
+                "required": ["title", "subtitle", "cover", "themes", "reuse", "rationale"],
                 "properties": {
                     "title": {"type": "string"}, "subtitle": {"type": "string"}, "rationale": {"type": "string"},
                     "themes": {"type": "array", "items": {"type": "string"}},
+                    "reuse": {"type": "array", "items": {"type": "string"}},
                     "cover": {"type": "object", "additionalProperties": False,
                               "required": ["title1", "title2", "sub", "back_title", "back_subtitle", "blurb", "bullets", "spine", "scene"],
                               "properties": {k: {"type": "string"} for k in
@@ -132,6 +220,52 @@ SCHEMA_REVIEW = {"type": "object", "additionalProperties": False,
                                 "pages_to_redo": {"type": "array", "items": {
                                     "type": "object", "additionalProperties": False, "required": ["id", "reason"],
                                     "properties": {"id": {"type": "string"}, "reason": {"type": "string"}}}}}}
+
+
+SCHEMA_STOREFRONT = {"type": "object", "additionalProperties": False, "required": ["candidates", "choice", "rationale"],
+                     "properties": {"choice": {"type": "string"}, "rationale": {"type": "string"},
+                                    "candidates": {"type": "array", "items": {
+                                        "type": "object", "additionalProperties": False,
+                                        "required": ["id", "storefront_score", "title_covers_face", "scene_matches_title", "problems"],
+                                        "properties": {"id": {"type": "string"}, "storefront_score": {"type": "integer"},
+                                                       "title_covers_face": {"type": "boolean"},
+                                                       "scene_matches_title": {"type": "boolean"},
+                                                       "problems": {"type": "array", "items": {"type": "string"}}}}}}}
+
+
+def storefront(folder, L, fronts):
+    """Cleiton, 25 Nov 2026: the cover must make someone scrolling search results stop and click.
+    Lays out the candidate fronts as thumbnails next to the competitor covers the benchmark saw and asks for the choice."""
+    from PIL import Image, ImageDraw
+    comp = sorted(glob.glob(f"{folder}/benchmark/img/cover-*.jpg"))[:8] + sorted(glob.glob(f"{folder}/benchmark/img-stores/*-1.jpg"))[:4]
+    def row(items, side):
+        sheet = Image.new("RGB", (len(items) * (side + 16) + 16, side + 40), "white"); d = ImageDraw.Draw(sheet)
+        for i, (label, fi) in enumerate(items):
+            t = Image.open(fi).convert("RGB"); t.thumbnail((side, side)); x = 16 + i * (side + 16)
+            d.text((x, 6), label, fill="black"); sheet.paste(t, (x, 26))
+        return sheet
+    ours = [(k, fr) for k, fr in fronts]
+    parts = [row(ours, 420), row(ours + [(f"competitor {i + 1}", c) for i, c in enumerate(comp)], 130)]
+    out = Image.new("RGB", (max(p.width for p in parts), sum(p.height for p in parts) + 20), "white")
+    y = 0
+    for p in parts:
+        out.paste(p, (0, y)); y += p.height + 20
+    sheet_f = f"{folder}/kit/storefront.png"
+    out.save(sheet_f)
+    v = codex("Revisor", (
+        "You judge book covers the way a shopper scrolls search results for "
+        f"'{L['title']}'-type adult coloring books. The attached sheet shows our candidate front covers "
+        f"({', '.join(k for k, _ in ours)}) large on top, and below the same candidates at search-result thumbnail size "
+        + (f"next to {len(comp)} competitor covers. " if comp else "(no competitor covers available). ")
+        + f"Our title: {L['cover'].get('title1', '')} {L['cover'].get('title2', '')}. The book: {L['subtitle']}.\n"
+        "For each candidate give storefront_score 0-10: would it make a shopper stop and click among the competitors at "
+        "thumbnail size (strong saturated color, big readable title, clear focal subject with faces, matches what the book "
+        "promises). title_covers_face=true if the title or subtitle hides any part of a person's or animal's head: look at the large versions, right behind and just under the title letters; a body or legs whose head is not visible counts as a hidden head. scene_matches_title=false if the "
+        "scene contradicts the title. problems: concrete visible defects only (deformed hands or faces, cut-off heads, "
+        "text inside the art). choice = id of the best candidate with no covered face and a matching scene. "
+        "Write rationale in English, 2-4 short sentences comparing with the competitors."),
+        SCHEMA_STOREFRONT, folder, f"{folder}/kit/storefront.json", [sheet_f])
+    return v
 
 
 def contact_sheets(folder, L, st, per=12, side=420):
@@ -224,7 +358,7 @@ def net_per_sale(channel, p, pages=0):
 def estimated_creation_cost(n_pages):
     """Cost of creating a book (images, cover, Apify), paid once. Average of books already made; without history, estimates."""
     done = [m["recorded_spend_usd"] for m in (lj(f) for f in glob.glob(f"{BOOKS}/*/kit/metrics.json")) if m]
-    return round(max(statistics.mean(done) if done else 0, n_pages * 1.5 * IMG_COST + COVER_COST), 2)
+    return round(max(statistics.mean(done) if done else 0, n_pages * 1.5 * IMG_COST + 3 * COVER_COST), 2)
 
 
 def price_below(channel, median, pages=0, creation_cost=0.0):
@@ -264,7 +398,8 @@ SCHEMA_BENCH = {"type": "object", "additionalProperties": False,
 PAGE_RULES = ("Draw the whole scene as one complete vignette centered on the page with a wide white margin on every "
               "side; nothing touches or is cut by the page edges. Avoid hanging signs, labels, posters, book titles and "
               "anything that could carry writing. Black outlines on a pure white background, no shading, no hatching, "
-              "no gray, no color, no text, no letters, no numbers.")
+              "no gray, no color, no text, no letters, no numbers. No border, no frame, no arch or outline enclosing the scene "
+              "or the page.")
 
 
 def lessons():
@@ -325,15 +460,22 @@ def benchmark(name, folder, req, n_pages, ap):
             raise RuntimeError("request without keywords or market_data for the benchmark")
         n = int(req.get("books_per_kw", 36))
         cost = len(kws) * n * APIFY_COST_PER_BOOK
-        if month_spend() + cost > MONTH_CAP and not ap.get("month_cap_" + today()[:7]):
-            gate(name, "month_cap_" + today()[:7], f"Benchmark would cost ~US$ {cost:.2f}; the month would go above US$ {MONTH_CAP}.")
+        if month_spend() + cost > MONTH_CAP and not (ap.get("month_cap_" + today()[:7]) or company_approvals().get("month_cap_" + today()[:7])):
+            gate(name, "month_cap_" + today()[:7], f"Benchmark would cost ~US$ {cost:.2f}; the month would go above the cap {cap_txt()}.")
             return "gate"
-        log(name, "benchmark apify", kws)
-        r = run([PY, f"{BIN}/market_amazon2.py"] + kws, timeout=2400, extra={"BOOKS_PER_KW": str(n)})
-        if r.returncode:
-            raise RuntimeError("apify: " + (r.stdout + r.stderr)[-400:])
-        info = json.loads(r.stdout.strip().splitlines()[-1])
-        spend(f"{name}: benchmark apify", info.get("cost_usd") or cost)
+        short = apify_wait(cost)
+        if short:
+            info = serpapi_fallback(name, kws, n, short)
+            if not info:
+                log(name, "benchmark waiting", short)
+                return "waiting"
+        else:
+            log(name, "benchmark apify", kws)
+            r = run([PY, f"{BIN}/market_amazon2.py"] + kws, timeout=2400, extra={"BOOKS_PER_KW": str(n)})
+            if r.returncode:
+                raise RuntimeError("apify: " + (r.stdout + r.stderr)[-400:])
+            info = json.loads(r.stdout.strip().splitlines()[-1])
+            spend(f"{name}: benchmark apify", info.get("cost_usd") or cost)
         source = info["file"]
     seen, books = set(), []
     for it in lj(source)["items"]:
@@ -369,19 +511,36 @@ def benchmark(name, folder, req, n_pages, ap):
             log(name, "gumroad comps failed", r.stderr[-200:])
     sj(f"{bd}/data.json", {"books": books[:40], "prices": prices})
     imgs = competitor_sheets(bd, selling) if lj(CONFIG, {}).get("benchmark_amazon_images") else []
+    n_amazon = len(imgs)
+    # Cleiton, 25 Nov 2026 (decision 0021): look at the drawings in the competitors' own stores, only where robots.txt allows
+    store_domains, store_notes = lj(CONFIG, {}).get("competitor_stores") or [], []
+    if store_domains:
+        sys.path.insert(0, BIN)
+        import stores
+        q_store = req.get("store_query") or req.get("gumroad_query") or (req.get("keywords") or [""])[0]
+        try:
+            f_s, store_notes = stores.sheet(bd, q_store, store_domains)
+        except Exception as e:
+            f_s, store_notes = [], [f"stores failed: {type(e).__name__}: {e}"]
+        imgs += f_s
+        log(name, "benchmark stores", "; ".join(store_notes))
     log(name, "benchmark analyst", len(books), "books", len(imgs), "sheets")
     a = codex("Analista", (
         f"Competitor benchmark before we make a coloring book. Board request: {json.dumps(req, ensure_ascii=False)}.\n"
         "Data: the file benchmark/data.json in this folder (Amazon.com coloring books sorted by BSR: price, "
         "reviews, stars, publication date, pages, review summary, description). Read it.\n"
-        + ("The attached images are the covers (numbered in file order) and sample pages (labelled book.sample) of the "
-           "best sellers. Look at them. " if imgs else
+        + (("The attached images: " + ("first the covers (numbered in file order) and sample pages "
+            "(book.sample) of the best sellers on Amazon; " if n_amazon else "")
+            + ("sheet-stores.png has product photos taken from the competitors' own stores (" + ", ".join(store_domains)
+               + "), with pages from inside the books; they are marketing photos (open book, background, badges), judge only the "
+                 "drawings: line weight, amount of detail, people and faces, frames. " if len(imgs) > n_amazon else "")
+            + "Look at them and say in the report what you saw. ") if imgs else
            "You have no images: judge covers and drawings only from what titles, descriptions and reviews say, and write that "
            "in the report. ")
         + f"Lessons from previous books:\n{lessons()}\n"
         "Answer:\n(1) use_character: do the best sellers in this niche use a recurring character (e.g. the same cat on "
-        "every page)? Only true if the data shows it helps here. character = short description in English (empty if "
-        "false). character_rationale with the evidence.\n(2) page_style: prompt in English to generate each page, with "
+        "every page)? Only true if the data shows it helps here. character = fixed description in English, with size, body shape, markings and face, "
+        "to use with the same text on every page (empty if false). character_rationale with the evidence.\n(2) page_style: prompt in English to generate each page, with "
         "{theme} where the theme goes; state the level of detail and the line style this niche asks for (bold and easy, detailed, etc.) "
         "and the character if use_character. No rules about margins, text or color: the code appends them.\n(3) cover_direction: in "
         "English, how the full-color illustration on our cover stands out from the covers that sell.\n(4) selling_themes; complaints and "
@@ -395,7 +554,9 @@ def benchmark(name, folder, req, n_pages, ap):
     sj(bf, b)
     est_pages = 2 * n_pages + 2
     lines = [f"# Benchmark: {req.get('niche', '')[:80]}", "", f"{today()}. Confidence {a['confidence']}%. "
-             f"Competitor images seen: {'yes' if imgs else 'no (text only)'}.", "",
+             f"Competitor images seen: {'yes' if imgs else 'no (text only)'}.", ""] + \
+            (["## Images from the competitors' stores (only where robots.txt allows; never Amazon, Etsy, Gumroad)", ""]
+             + [f"- {x}" for x in store_notes] + [""] if store_notes else []) + [
              "## Price (rule 0012: below the median, with a floor after fees and tax reserve)",
              "", "| Channel | Competitor median | Our price | Net per sale | Profit per sale after IRPF (2nd sale onwards) | 1st sale pays creation | Minimum price that pays |", "|---|---|---|---|---|---|---|"]
     for channel, k in (("kdp", "amazon"), ("gumroad", "gumroad")):
@@ -555,12 +716,23 @@ def book(t, name):
     # 0. competitor benchmark (decision 0012)
     if not L.get("pages"):
         bench = benchmark(name, folder, req, n_pages, ap)
-        if bench == "gate":
-            return "gate"
+        if bench in ("gate", "waiting"):
+            return bench
 
     # A. brief
     if not L.get("pages"):
         log(name, "brief")
+        # Cleiton, 25 Nov 2026 (decision 0024): bank of pages from published books, up to 30% of the new book
+        sys.path.insert(0, BIN)
+        import image_bank
+        bank = {x["key"]: x for x in image_bank.index(exclude=(os.path.basename(folder),))}
+        max_reuse = image_bank.maximum(n_pages) if bank and not req.get("no_bank") else 0
+        bank_txt = ("" if not max_reuse else
+                    f"\nBANK of pages already drawn and approved in our other books (key: theme [book]). You may pick "
+                    f"up to {max_reuse} for this book in 'reuse' (the exact keys), ONLY the ones that really fit the angle and the "
+                    "audience of this book; zero is also fine. The picked ones count toward the total: new themes + reuse = "
+                    f"{n_pages}. The new themes must not repeat the bank scenes you picked.\n"
+                    + "\n".join(f"- {k}: {x['theme']} [{x['title']}]" for k, x in bank.items()))
         b = codex("Editor", (
             f"Prepare the brief for an adult coloring book. Board request: {json.dumps(req, ensure_ascii=False)}.\n"
             f"Give: title and subtitle (language of the market), {n_pages} page themes DIFFERENT from each other (each theme a "
@@ -572,30 +744,56 @@ def book(t, name):
             f"Follow the competitor benchmark (BENCHMARK.md in this folder). Recurring character: "
             f"{bench['character'] if bench['use_character'] else 'NONE, do not add a fixed character'}. "
             f"Themes that sell: {'; '.join(bench['selling_themes'])}. Do better: {'; '.join(bench['do_better'])}. "
-            f"Cover: {bench['cover_direction']}\nLessons from previous books:\n{lessons()}"), SCHEMA_BRIEF, folder, f"{folder}/brief.json")
-        if len(b["themes"]) < n_pages:
-            raise RuntimeError(f"brief with {len(b['themes'])} themes, requested {n_pages}")
+            f"Cover: {bench['cover_direction']}\nLessons from previous books:\n{lessons()}" + bank_txt), SCHEMA_BRIEF, folder,
+            f"{folder}/brief.json")
+        reuse = [bank[k] for k in dict.fromkeys(b.get("reuse") or []) if k in bank][:max_reuse]
+        if reuse:  # all in the same drawing style, otherwise the book looks mixed
+            reuse = [x for x in reuse if x["style"] == reuse[0]["style"]]
+        if len(b["themes"]) + len(reuse) < n_pages:
+            raise RuntimeError(f"brief with {len(b['themes'])} themes + {len(reuse)} from the bank, requested {n_pages}")
+        new = [{"theme": x} for x in b["themes"][:n_pages - len(reuse)]]
+        # reused pages spread across the book, not all together
+        order, k = list(new), 0
+        for j, x in enumerate(reuse):
+            pos = round((j + 0.5) * len(new) / len(reuse)) + j
+            order.insert(pos, {"theme": x["theme"], "origin": {"book": x["book"], "id": x["id"], "title": x["title"]}})
         L.update(title=b["title"], subtitle=b["subtitle"], cover=b["cover"], size="1024x1024",
-                 style=L["style"] if L.get("fixed_style") else bench["page_style"] + " " + PAGE_RULES,
-                 mascot=bench["character"] if bench["use_character"] else None, cover_direction=bench["cover_direction"],
-                 pages=[{"id": f"p{i + 1:02d}", "theme": x} for i, x in enumerate(b["themes"][:n_pages])])
+                 style=(reuse[0]["style"] if reuse else
+                        L["style"] if L.get("fixed_style") else bench["page_style"] + " " + PAGE_RULES),
+                 mascot=None if reuse else bench["character"] if bench["use_character"] else None,
+                 cover_direction=bench["cover_direction"],
+                 pages=[dict(p, id=f"p{i + 1:02d}") for i, p in enumerate(order[:n_pages])])
         sj(f"{folder}/book.json", L)
     if not ap.get("brief") or not L.get("brand") or "[" in L.get("brand", "["):
-        gate(name, "brief", f"Approve brief: \"{L['title']}\" ({len(L['pages'])} pages). "
+        n_reused = sum(1 for p in L["pages"] if p.get("origin"))
+        gate(name, "brief", f"Approve brief: \"{L['title']}\" ({len(L['pages'])} pages"
+             + (f", {n_reused} from the bank of earlier books" if n_reused else "") + "). "
              f"Brand/author: {L.get('brand') or 'NOT DEFINED YET'}.",
              [f"{folder}/BENCHMARK.md", f"{folder}/book.json", f"{folder}/brief.json"])
         return "gate"
 
     # C. pages
     st = lj(f"{folder}/state.json", {})
+    changed = False
+    for p in L["pages"]:
+        o = p.get("origin")
+        if o and st.get(p["id"], {}).get("state") != "approved":
+            src = f"{BOOKS}/{o['book']}/final/{o['id']}.png"
+            os.makedirs(f"{folder}/final", exist_ok=True)
+            shutil.copy(src, f"{folder}/final/{p['id']}.png")
+            st[p["id"]] = {"state": "approved", "attempts": [], "reused_from": o}
+            changed = True
+    if changed:
+        sj(f"{folder}/state.json", st)
+        log(name, "pages from the bank", sum(1 for p in L["pages"] if p.get("origin")))
     done = [p for p in L["pages"] if st.get(p["id"], {}).get("state") in ("approved", "human_queue")]
     if len(done) < len(L["pages"]):
         missing = (len(L["pages"]) - len(done)) * 1.5 * IMG_COST
         if book_cost(folder) + missing > BOOK_CAP and not ap.get("book_cap"):
             gate(name, "book_cap", f"Pages would cost ~US$ {book_cost(folder) + missing:.2f} (> cap US$ {BOOK_CAP}).")
             return "gate"
-        if month_spend() + missing > MONTH_CAP and not ap.get("month_cap_" + today()[:7]):
-            gate(name, "month_cap_" + today()[:7], f"Month spend would reach ~US$ {month_spend() + missing:.2f} (> cap US$ {MONTH_CAP}).")
+        if month_spend() + missing > MONTH_CAP and not (ap.get("month_cap_" + today()[:7]) or company_approvals().get("month_cap_" + today()[:7])):
+            gate(name, "month_cap_" + today()[:7], f"Month spend would reach ~US$ {month_spend() + missing:.2f} (> cap {cap_txt()}).")
             return "gate"
         log(name, "pages", len(done), "/", len(L["pages"]))
         before = book_cost(folder)
@@ -625,15 +823,49 @@ def book(t, name):
     # E. cover
     art = f"{folder}/kit/cover-art.png"
     if not os.path.exists(art):
-        log(name, "cover art")
-        prompt = ("Warm, cozy hand-drawn illustration in soft muted colors with brown ink outlines, storybook style: "
-                  + L["cover"]["scene"] + ". Centered vignette, no frame, no text, no letters, plain solid cream "
-                  "background color #FDF0DB around the scene, generous empty margin on every side."
-                  + (" Art direction: " + L["cover_direction"] if L.get("cover_direction") else ""))
-        r = run([PY, f"{BIN}/generate_image.py", "gpt-image-2", "low", art, prompt], extra={"SIZE": "1024x1024"})
-        if r.returncode:
-            raise RuntimeError("cover art: " + r.stdout[-300:])
-        spend(f"{name}: cover art", COVER_COST)
+        # Cleiton, 25 Nov 2026: the cream cover with a small vignette vanished in search. Now: art to the edge, strong colors,
+        # people with faces, 3 candidates, and the storefront compares them as thumbnails with the competition before picking.
+        if not L["cover"].get("mode"):
+            L["cover"].update(mode="full_bleed", background_color=[253, 240, 219], outline_color=[110, 22, 22], accent_color=[220, 150, 40])
+            sj(f"{folder}/book.json", L)
+        moments = ["the main moment of the scene", "a closer, more intimate moment of the same idea, faces large",
+                   "a wider moment of the same idea with more of the setting"]
+        fronts = []
+        for k, mom in zip("ABC", moments):
+            fk = f"{folder}/kit/cover-art-{k}.png"
+            if not os.path.exists(fk):
+                log(name, f"cover art {k}")
+                prompt = (L["cover"]["scene"] + f". Show {mom}. Full-bleed square illustration that fills the ENTIRE image "
+                          "edge to edge, no empty margin, no border, no frame, no vignette. Bold and easy coloring-book line "
+                          "art colored in: thick clean black outlines, big simple shapes, flat saturated colors, high contrast, "
+                          "cheerful. Expressive people or animals with clear friendly faces, large, seen close up, all heads "
+                          "and faces in the lower 60 percent of the image. The upper 40 percent is a calm, simple area (plain "
+                          "wall or sky) where a title will be added later. No text, no letters, no numbers, no logos, no brand "
+                          "or famous characters." + (" Art direction: " + L["cover_direction"] if L.get("cover_direction") else ""))
+                r = run([PY, f"{BIN}/generate_image.py", "gpt-image-2", "low", fk, prompt], extra={"SIZE": "1024x1024"})
+                if r.returncode:
+                    raise RuntimeError("cover art: " + r.stdout[-300:])
+                spend(f"{name}: cover art {k}", COVER_COST)
+            r = run([PY, f"{BIN}/final_cover.py", f"{BOOKS}/fonts", fk, str(n_int), f"{folder}/kit/cover-cand-{k}"],
+                    extra={"BOOK_JSON": f"{folder}/book.json"})
+            if r.returncode:
+                raise RuntimeError("cover candidate: " + r.stderr[-400:])
+            from PIL import Image
+            pv = Image.open(f"{folder}/kit/cover-cand-{k}-preview.png").convert("RGB")
+            pv.crop((pv.width - int(8.625 * 300), 0, pv.width, pv.height)).save(f"{folder}/kit/front-{k}.jpg", quality=90)
+            fronts.append((k, f"{folder}/kit/front-{k}.jpg"))
+        log(name, "cover storefront")
+        v = storefront(folder, L, fronts)
+        good = [c for c in v["candidates"] if not c["title_covers_face"] and c["scene_matches_title"] and not c["problems"]]
+        best = max(good, key=lambda c: c["storefront_score"]) if good else None
+        if not best or best["storefront_score"] < 7:
+            if not ap.get("cover_storefront"):
+                gate(name, "cover_storefront", "No cover candidate passed the storefront (score 7+, no covered face). "
+                     + v["rationale"], [f"{folder}/kit/storefront.png", f"{folder}/kit/storefront.json"])
+                return "gate"
+            best = max(v["candidates"], key=lambda c: c["storefront_score"])
+        shutil.copy(f"{folder}/kit/cover-art-{best['id']}.png", art)
+        log(name, "cover picked in the storefront", best["id"], best["storefront_score"])
     if not os.path.exists(f"{folder}/kit/cover.pdf") or os.path.getmtime(f"{folder}/kit/cover.pdf") < os.path.getmtime(f"{folder}/kit/interior.pdf"):
         log(name, "cover")
         approved = [st[p["id"]]["attempts"][-1]["file"] for p in L["pages"]
@@ -794,6 +1026,19 @@ def book(t, name):
         drive_and_spreadsheet(name, folder, L, dest)
     except Exception as e:
         log(name, "drive", f"failed, will retry on the next round: {str(e)[:300]}")
+    # L. Promoter (Cleiton's request, 23 Nov 2026): texts, images and DRAFTS for Gumroad, Etsy and Pinterest.
+    #    Never publishes. Repeats at no cost (each step skips if the file already exists). Does not block the KDP upload.
+    if not ap.get("promote"):
+        try:
+            r = run([PY, f"{BIN}/promote.py", folder], timeout=3600)
+            if r.returncode:
+                log(name, "promote", f"failed, will retry on the next round: {(r.stderr or r.stdout)[-300:]}")
+        except Exception as e:
+            log(name, "promote", f"failed, will retry on the next round: {str(e)[:300]}")
+        if os.path.exists(f"{folder}/kit/PROMOTE.md"):
+            gate(name, "promote", "Promotion ready as drafts (Gumroad, Etsy, 5 pins). Review kit/PROMOTE.md and publish. "
+                 "Tell me when it is done.", [f"{folder}/kit/PROMOTE.md", f"{folder}/kit/channels.json",
+                                              f"{folder}/kit/pinterest/pins.json"])
     if not ap.get("upload"):
         gate(name, "upload", f"Kit ready: review cover and interior and do the upload on KDP. Tell me when it is done.",
              [f"{dest}/KIT.md", f"{dest}/RETRO.md", f"{dest}/cover-preview.png", f"{dest}/interior.pdf"])
@@ -819,15 +1064,22 @@ def research(t, name):
     if not os.path.exists(data):
         n = int(t.get("books_per_kw", 12))
         cost = len(t["keywords"]) * n * APIFY_COST_PER_BOOK
-        if month_spend() + cost > MONTH_CAP and not ap.get("month_cap_" + today()[:7]):
-            gate(name, "month_cap_" + today()[:7], f"Research would cost ~US$ {cost:.2f}; the month would go above US$ {MONTH_CAP}.")
+        if month_spend() + cost > MONTH_CAP and not (ap.get("month_cap_" + today()[:7]) or company_approvals().get("month_cap_" + today()[:7])):
+            gate(name, "month_cap_" + today()[:7], f"Research would cost ~US$ {cost:.2f}; the month would go above the cap {cap_txt()}.")
             return "gate"
-        log(name, "apify", len(t["keywords"]), "keywords")
-        r = run([PY, f"{BIN}/market_amazon2.py"] + t["keywords"], timeout=2400, extra={"BOOKS_PER_KW": str(n)})
-        if r.returncode:
-            raise RuntimeError("apify: " + (r.stdout + r.stderr)[-400:])
-        info = json.loads(r.stdout.strip().splitlines()[-1])
-        spend(f"{name}: apify", info.get("cost_usd") or cost)
+        short = apify_wait(cost)
+        if short:
+            info = serpapi_fallback(name, t["keywords"], n, short)
+            if not info:
+                log(name, "apify waiting", short)
+                return "waiting"
+        else:
+            log(name, "apify", len(t["keywords"]), "keywords")
+            r = run([PY, f"{BIN}/market_amazon2.py"] + t["keywords"], timeout=2400, extra={"BOOKS_PER_KW": str(n)})
+            if r.returncode:
+                raise RuntimeError("apify: " + (r.stdout + r.stderr)[-400:])
+            info = json.loads(r.stdout.strip().splitlines()[-1])
+            spend(f"{name}: apify", info.get("cost_usd") or cost)
         raw = lj(info["file"])
         lean = [{k: (it.get(k) if k != "aiReviewsSummary" else (it.get(k) or {}).get("text")) for k in FIELDS}
                 for it in raw["items"]]
@@ -852,6 +1104,153 @@ def research(t, name):
     return "done"
 
 
+# ----------------------------------------------------------------- book of the day
+SCHEMA_REQUEST = {"type": "object", "additionalProperties": False,
+                  "required": ["slug", "niche", "keywords", "gumroad_query", "rationale"],
+                  "properties": {"slug": {"type": "string"}, "niche": {"type": "string"}, "rationale": {"type": "string"},
+                                 "gumroad_query": {"type": "string"},
+                                 "keywords": {"type": "array", "items": {"type": "string"}}}}
+
+
+def book_of_the_day():
+    """Cleiton's rule (23 Nov 2026): 1 book per day up to the month's spend cap; at the cap it asks whether to go on."""
+    reg_f = f"{COMPANY}/book-of-the-day.json"
+    reg = lj(reg_f, {}) or {}
+    if reg.get("last") == today():
+        return
+    key = "month_cap_" + today()[:7]
+    if month_spend() >= MONTH_CAP and not company_approvals().get(key):
+        gate("book-of-the-day", key, f"Month cap reached: spent US$ {month_spend():.2f} (cap {cap_txt()}). "
+             "Do I go on with 1 book per day this month? (yes/no)")
+        report_rows.append("| book-of-the-day | stopped at the month cap |")
+        return
+    tasks = [(f, lj(f, {})) for f in sorted(glob.glob(f"{QUEUE}/*.json"))]
+    waiting = 0
+    for f, t in tasks:
+        if t.get("created_by") == "book_of_the_day" and t.get("state") != "done":
+            if not (lj(f"{H(t['folder'])}/approvals.json", {}) or {}).get("brief"):
+                waiting += 1
+    if waiting >= MAX_BRIEFS_WAITING:
+        report_rows.append(f"| book-of-the-day | not created: {waiting} briefs waiting for approval |")
+        return
+    existing = []
+    for f, t in tasks:
+        if t.get("type") == "book":
+            L = lj(f"{H(t['folder'])}/book.json", {}) or {}
+            existing.append(f"{L.get('title', '?')} | {(L.get('request') or {}).get('niche', '?')}")
+    os.makedirs(f"{COMPANY}/book-of-the-day", exist_ok=True)
+    log("book-of-the-day", "analyst")
+    p = codex("Analista", (
+        "Propose the next adult coloring book for MySandboxBooks (rule: 1 new book per day). "
+        "Read the market data in market/ in this folder (junglee files and niches-*.log) and pick a niche with demand "
+        "where we can do better. Do not repeat or nearly repeat these books we already have:\n- " + "\n- ".join(existing) +
+        f"\nToday is {today()}: think of seasonal dates that still leave time (a book takes a few days to be ready). "
+        + (("Cleiton's rule for December (until 23 Dec): alternate one Christmas book and one from another niche. The last book of the day was "
+            f"'{reg.get('niche', 'none')}', so today is "
+            + ("ANOTHER NICHE (not Christmas). " if "christmas" in (reg.get("niche") or "").lower() else
+               "CHRISTMAS, with an angle different from the Christmas books we already have (another audience, another setting or another "
+               "moment; the title must not look like one of our books). "))
+           if today() <= "2026-12-23" else "") +
+        "Rules: no third-party brands, characters, authors or art; no health promises; niche written in English "
+        "as in the example 'cozy christmas coloring book for adults: warm holiday scenes at home...', with what must NOT appear. "
+        "Give 3 real Amazon.com search keywords (the ones a buyer types), a short gumroad_query (2 words), "
+        "a short lowercase slug with hyphens, and rationale in English with the facts from the data (separate measured from estimated, "
+        "never invent numbers)."), SCHEMA_REQUEST, BOOKS, f"{COMPANY}/book-of-the-day/{today()}.json")
+    sl = slug(p["slug"])[:40] or "book-" + today()
+    folder = f"{BOOKS}/{sl}"
+    while os.path.exists(folder):
+        folder += "-2"
+    os.makedirs(folder)
+    template = lj(f"{BOOKS}/book-template.json", {}) or {}
+    sj(f"{folder}/book.json", {
+        "request": {"niche": p["niche"], "pages": 50, "language": "English",
+                    "market": "Gumroad and Etsy (printable PDF) first; Amazon.com KDP later",
+                    "keywords": p["keywords"][:3], "gumroad_query": p["gumroad_query"],
+                    "analyst_rationale": p["rationale"], "created": today()},
+        "brand": "MySandboxBooks", "style": template.get("style", "")})
+    n = max([int(os.path.basename(f)[:3]) for f, _ in tasks if os.path.basename(f)[:3].isdigit()] + [0]) + 10
+    sj(f"{QUEUE}/{n:03d}-{os.path.basename(folder)}.json",
+       {"type": "book", "folder": "~/books/" + os.path.basename(folder), "created_by": "book_of_the_day", "created": today()})
+    sj(reg_f, {"last": today(), "folder": folder, "niche": p["niche"]})
+    log("book-of-the-day", "created", folder)
+
+
+# ----------------------------------------------------------------- improvements and weekly review
+def pending_improvements():
+    """Each unticked improvement in improvements.md goes to the pending decisions. Cleiton approves ([x]) or rejects ([-])."""
+    if not os.path.exists(IMPROVEMENTS):
+        return
+    todo = [l.strip()[6:] for l in open(IMPROVEMENTS) if l.strip().startswith("- [ ] ")]
+    if todo:
+        gate("improvements", "approve", f"{len(todo)} improvements from the retros to approve or reject:\n" +
+             "\n".join(f"  {i}. {x}" for i, x in enumerate(todo, 1)), [IMPROVEMENTS])
+
+
+SCHEMA_WEEK = {"type": "object", "additionalProperties": False,
+               "required": ["summary", "numbers", "top3", "lessons"],
+               "properties": {"summary": {"type": "string"},
+                              "numbers": {"type": "array", "items": {"type": "string"}},
+                              "lessons": {"type": "array", "items": {"type": "string"}},
+                              "top3": {"type": "array", "items": {
+                                  "type": "object", "additionalProperties": False,
+                                  "required": ["type", "action", "expected_gain", "evidence"],
+                                  "properties": {k: {"type": "string"} for k in ("type", "action", "expected_gain", "evidence")}}}}}
+
+
+def weekly_review(force=False):
+    """Friday (Cleiton's request, 23 Nov 2026): the Retro gathers the whole week and brings the 3 best improvements."""
+    year, week, day = datetime.date.today().isocalendar()
+    key = f"{year}-W{week:02d}"
+    out = f"{COMPANY}/reports/week-{key}.md"
+    if not force and (day != 5 or os.path.exists(out)):
+        return
+    since = (datetime.date.today() - datetime.timedelta(days=7)).isoformat()
+    books = []
+    for m in glob.glob(f"{BOOKS}/*/kit/metrics.json"):
+        if datetime.date.fromtimestamp(os.path.getmtime(m)).isoformat() >= since:
+            books.append(lj(m, {}))
+    spends = [json.loads(l) for l in open(SPEND) if l.strip() and json.loads(l)["date"] >= since]
+    r = run([PY, f"{BIN}/sales.py"], timeout=600)
+    sales = r.stdout.strip() if r.returncode == 0 else "no data (sales.py failed)"
+    queue = []
+    for f in sorted(glob.glob(f"{QUEUE}/*.json")):
+        t = lj(f, {}) or {}
+        queue.append(f"{os.path.basename(f)[:-5]}: {t.get('state', '?')}")
+    to_approve = \
+        [l.strip()[6:] for l in (open(IMPROVEMENTS) if os.path.exists(IMPROVEMENTS) else []) if l.strip().startswith("- [ ] ")]
+    log("week", key, "retro")
+    s = codex("Retro", (
+        f"Weekly review {key} of the coloring book factory (from {since} to {today()}). Goal: spend as little "
+        "as possible to deliver the best book and start selling.\n"
+        f"Books finished this week (metrics measured by the code): {json.dumps(books, ensure_ascii=False) or 'none'}\n"
+        f"Spend this week: {json.dumps(spends, ensure_ascii=False)}\n"
+        f"Month spend: US$ {month_spend():.2f} of {cap_txt()}\n"
+        f"Gumroad sales (Log Sales tab): {sales}\n"
+        f"Queue: {'; '.join(queue)}\n"
+        "Also read improvements.md and lessons.md in ~/company and the RETRO.md files in ~/books/*/kit/.\n"
+        "Answer in English: summary (3-5 sentences), numbers (the most important ones, only the data here), new lessons "
+        "Improvements already proposed and still awaiting approval (do NOT repeat them, rewrite them, or propose another one on the SAME problem):\n" +
+        "\n".join(f"- {x}" for x in to_approve) + "\n"
+        "(only those not yet in lessons.md) and top3: the 3 NEW improvements with the most gain for next week "
+        "(if there are not 3 new ones with evidence, give fewer), each one "
+        "with type (cost/time/quality/sales), concrete action, expected gain and the evidence. Use only the numbers given; "
+        "never invent. Code changes are proposals: the board approves."),
+        SCHEMA_WEEK, COMPANY, f"{COMPANY}/reports/week-{key}.json")
+    md = [f"# Weekly review {key}", "", f"{since} to {today()}. Done by the Retro.", "", s["summary"], "", "## Numbers"]
+    md += [f"- {x}" for x in s["numbers"]] + ["", "## Top 3 improvements (board approves)"]
+    md += [f"{i}. [{x['type']}] {x['action']} (gain: {x['expected_gain']}; why: {x['evidence']})"
+           for i, x in enumerate(s["top3"], 1)]
+    md += ["", "## New lessons"] + [f"- {x}" for x in s["lessons"]]
+    open(out, "w").write("\n".join(md) + "\n")
+    with open(IMPROVEMENTS, "a") as f:
+        f.write(f"\n## {today()} Weekly review {key} (proposals, board approves)\n" +
+                "".join(f"- [ ] [{x['type']}] {x['action']} (gain: {x['expected_gain']})\n" for x in s["top3"]))
+    if s["lessons"]:
+        with open(LESSONS, "a") as f:
+            f.write(f"\n## Week {key}\n" + "".join(f"- {x}\n" for x in s["lessons"]))
+    gate("weekly-review", key, f"Weekly review ready: {s['summary'][:300]}", [out])
+
+
 # ----------------------------------------------------------------- cycle
 def report():
     os.makedirs(os.path.dirname(REPORT), exist_ok=True)
@@ -862,12 +1261,12 @@ def report():
             p.append(f"  - {f}")
     open(PENDING, "w").write("\n".join(p) + "\n")
     r = ["# Factory: status", "", f"Updated {time.strftime('%Y-%m-%d %H:%M')}. Month spend: US$ {month_spend():.2f} "
-         f"(cap US$ {MONTH_CAP}).", "", "| Task | Status |", "|---|---|"] + report_rows
+         f"(cap {cap_txt()}).", "", "| Task | Status |", "|---|---|"] + report_rows
     open(REPORT, "w").write("\n".join(r) + "\n")
 
 
 def commit():
-    run(["git", "add", "-A", "decisions/pending.md", "reports/factory.md", "queue", "projects", "spend.jsonl", "improvements.md", "config.json", "decisions"], cwd=COMPANY)
+    run(["git", "add", "-A", "decisions/pending.md", "reports/factory.md", "queue", "projects", "spend.jsonl", "improvements.md", "lessons.md", "config.json", "decisions", "book-of-the-day", "book-of-the-day.json", "exchange_rate.json", "approvals.json", "watchdog.json"], cwd=COMPANY)
     if run(["git", "diff", "--cached", "--quiet"], cwd=COMPANY).returncode:
         run(["git", "commit", "-qm", "Factory: status " + time.strftime("%Y-%m-%d %H:%M")], cwd=COMPANY)
         run(["git", "push", "-q"], cwd=COMPANY, timeout=120)
@@ -880,7 +1279,14 @@ def main():
     if os.path.exists(lock) and time.time() - os.path.getmtime(lock) < 8 * 3600:
         log("another run in progress; exiting"); return
     open(lock, "w").write(str(os.getpid()))
+    global MONTH_CAP
+    MONTH_CAP = USD_CAP_BY_MONTH.get(today()[:7]) or round(MONTH_CAP_EUR * usd_per_eur(), 2)
     try:
+        if "--status" not in sys.argv and "--no-book-of-the-day" not in sys.argv:
+            try:
+                book_of_the_day()
+            except Exception as e:
+                gate("book-of-the-day", "error", f"Could not create the book of the day: {str(e)[:300]}")
         for f in sorted(glob.glob(f"{QUEUE}/*.json")):
             t = lj(f)
             name = os.path.basename(f)[:-5]
@@ -900,6 +1306,24 @@ def main():
             sj(f, t)
             report_rows.append(f"| {name} | {res} |")
             log(name, "->", res)
+        # Sales log (Cleiton's request): Log Sales tab, every 6 hours. Failing here does not stop the factory.
+        mv = f"{COMPANY}/.sales.mark"
+        if "--status" not in sys.argv and (not os.path.exists(mv) or time.time() - os.path.getmtime(mv) > 6 * 3600):
+            try:
+                r = run([PY, f"{BIN}/sales.py"], timeout=600)
+                if r.returncode == 0:
+                    open(mv, "w").write(r.stdout.strip())
+                    report_rows.append(f"| sales-log | {r.stdout.strip()} |")
+                else:
+                    log("sales", "failed", (r.stderr or r.stdout)[-300:])
+            except Exception as e:
+                log("sales", "failed", str(e)[:300])
+        if "--status" not in sys.argv:
+            try:
+                weekly_review("--week" in sys.argv)
+            except Exception as e:
+                gate("weekly-review", "error", f"The weekly review failed: {str(e)[:300]}")
+        pending_improvements()
         report()
         commit()
     finally:

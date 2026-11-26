@@ -1,6 +1,6 @@
 # Coloring Book Factory
 
-A mostly autonomous pipeline that researches the market, draws, reviews and packages adult coloring books. AI agents do the work; a human approves every step that spends money or goes public. It runs on a spare MacBook Air, every 30 minutes, with no server and no cloud bill.
+A mostly autonomous pipeline that researches the market, draws, reviews, packages and prepares the sale of adult coloring books. It starts one new book a day on its own. AI agents do the work; a human approves every step that spends money or goes public. It runs on a spare MacBook Air, every 30 minutes, with no server and no cloud bill.
 
 > **Source-available, not open source.** Free for personal and noncommercial use under the [PolyForm Noncommercial License 1.0.0](LICENSE). Want to use it commercially, or have a pipeline like this built for you? See [Work with me](#work-with-me).
 
@@ -8,14 +8,16 @@ A mostly autonomous pipeline that researches the market, draws, reviews and pack
 
 | | |
 |---|---|
-| **Input** | A one-line book idea (theme, audience, page count) dropped in a queue |
-| **Output** | A print-ready paperback kit (interior + cover PDFs), a printable Letter PDF, a free 5-page sample, listing copy, and, through a separate script, an Etsy listing draft |
-| **Agents** | Market analyst, editor (brief and listing), page checker, whole-book reviewer, retro coach |
+| **Input** | A one-line book idea dropped in a queue, or a "book of the day" the analyst agent picks from market data |
+| **Output** | A print-ready paperback kit (interior + cover PDFs), a printable Letter PDF, a free 5-page sample, Gumroad product drafts, an Etsy listing draft, Pinterest pin images and copy |
+| **Agents** | Market analyst, editor (brief, listing, sales copy), page checker, cover storefront judge, whole-book reviewer, retro coach |
 | **Human gates** | Brief, failed pages, price, final review, spend caps, upload |
 | **Cost per book** | About USD 0.02 per page image and USD 0.06 per cover image, plus market data; the language-model agents run on a flat subscription |
-| **Spend caps** | USD 2 per book and USD 10 per month without asking |
+| **Spend caps** | USD 2 per book and EUR 10 per month without asking (converted at the ECB daily rate); a higher cap can be set per month |
 
-> **Status (November 2026):** first book shipped. *Cozy Little Corners* (50 bold and easy pages, Toffee Tabby collection) is live on Gumroad as a [printable book](https://cleitonsenaa.gumroad.com/l/cozy-coloring-book-printable) and a [free sample](https://cleitonsenaa.gumroad.com/l/free-cozy-coloring-pages). The Etsy listing is a draft and the paperback kit is ready for upload, both waiting on the human.
+> **Status (late November 2026):** two books live on Gumroad. *Cozy Christmas* is a [printable book](https://cleitonsenaa.gumroad.com/l/cozy-christmas-coloring-book-adults-50-scenes) with a [free sample](https://cleitonsenaa.gumroad.com/l/free-christmas-coloring-pages-adults-sample); its Etsy listing is a draft at EUR 2.77 waiting for the human to publish. In December the factory alternates Christmas books with other niches, one a day.
+>
+> The first book: *Cozy Little Corners* (50 bold and easy pages, Toffee Tabby collection) is live on Gumroad as a [printable book](https://cleitonsenaa.gumroad.com/l/cozy-coloring-book-printable) and a [free sample](https://cleitonsenaa.gumroad.com/l/free-cozy-coloring-pages). The Etsy listing is a draft and the paperback kit is ready for upload, both waiting on the human.
 
 ## Pipeline
 
@@ -32,7 +34,16 @@ A mostly autonomous pipeline that researches the market, draws, reviews and pack
 | 9 | **Kit** | Upload checklist, printable PDF and free sample | `factory.py`, `printable.py` |
 | 10 | **Retro** | Cost per approved page and first-pass approval rate, compared with earlier books. A retro agent writes lessons that feed the next brief | `factory.py`, `retro`, `metrics` |
 | 11 | **Reporting** | Uploads the files to Google Drive and rebuilds a spreadsheet with one row per book (ready for filters and charts): costs, price, net per sale, payback | `factory.py`, `spreadsheet.py`, `gsheets.py` |
-| ✋ | **Upload** | The human uploads to the marketplace. The factory never publishes | human |
+| 12 | **Promote** | Builds the store images and sales copy, creates Gumroad and Etsy listings as DRAFTS (Etsy price EUR 2.77 by default) and the Pinterest pins, then writes the human's to-do list | `promote.py`, `etsy_draft.py` |
+| ✋ | **Publish** | The human publishes the drafts and uploads the paperback. The factory never publishes | human |
+
+Around the book line:
+
+- **Book of the day:** once a day the analyst agent picks a niche from the stored market data and queues a new book. It stops creating books while 3 briefs wait for a human yes.
+- **Image bank:** up to 30% of a new book's pages can come from approved pages of books already published, never their public sample or preview pages, and each page goes into at most 2 books.
+- **Storefront cover:** several cover candidates are judged side by side against competitor covers before one is picked.
+- **Watchdog:** a no-AI script checks the queue, gates, log and data balance every 30 minutes and only alerts the human when an automatic fix is not possible.
+- **Sales log:** Gumroad sales go to a spreadsheet, one row per sale, with no buyer data.
 
 A second task type, **research**, studies a niche (keywords → market data → analyst verdict with a confidence score) and stops at a "do we enter?" gate.
 
@@ -105,14 +116,15 @@ pending ──► generated ──► auto-check ──┬──► reviewer age
 | `failed_pages` | Pages failed 3 times | Redraw, drop or accept |
 | `price` | No price under the competitor median pays back the production cost | Pick a price or drop the book |
 | `final_review` | Whole-book reviewer scores the book below the bar | Fix or accept |
-| `upload` | Kit is ready | Review and upload to the marketplace |
+| `promote` | Gumroad, Etsy and Pinterest drafts are ready | Review and publish them |
+| `upload` | Paperback kit is ready | Review cover and interior and upload the paperback |
 | `decide` | A niche research task is done | Enter the niche or not |
 
 ## Rules the bots never break
 
 1. **Never** create accounts, pay, publish or contact anyone. Those are human actions.
 2. **Never** read, write or ask for passwords or keys. Keys live outside the repo (`chmod 600` files or the OS keychain) and are never printed.
-3. **Never** browse or scrape the marketplace directly. Market data comes from a third-party data provider.
+3. **Never** browse or scrape Amazon, Etsy or Gumroad. Market data comes from third-party data providers. Competitor cover images come only from competitors' own stores, and only where their robots.txt allows it.
 4. **Never** invent a number. Every figure has a source link or is labelled as an estimate.
 5. **Never** pass the spend caps without a human yes.
 
@@ -130,9 +142,18 @@ coloring-book-factory/
 │   ├── printable.py         # printable Letter PDF and free sample
 │   ├── market_amazon.py     # market data via Apify (niche analyzer actor)
 │   ├── market_amazon2.py    # market data via Apify (sales rank, monthly buys)
+│   ├── market_serpapi.py    # backup market data via SerpApi
+│   ├── stores.py            # competitor cover images from their own stores (robots.txt checked)
+│   ├── image_bank.py        # reusable approved pages from published books
+│   ├── reassess.py          # second look at pages stuck in the human queue
+│   ├── gemini_json.py       # backup agent runner (Gemini, Groq, Z.ai), JSON-schema outputs
+│   ├── promote.py           # sales kit: images, copy, Gumroad + Etsy drafts, Pinterest pins
+│   ├── etsy_oauth.py        # one-time Etsy OAuth 2.0 + PKCE login
+│   ├── etsy_draft.py        # Etsy listing DRAFT; no publish call
+│   ├── sales.py             # Gumroad sales log, one row per sale
+│   ├── watchdog.py          # no-AI health checks and alerts
 │   ├── spreadsheet.py       # one-row-per-book reporting sheet
-│   ├── gsheets.py           # Google Sheets access through the rclone token
-│   └── etsy_draft.py        # Etsy listing DRAFT (OAuth 2.0 + PKCE); no publish call
+│   └── gsheets.py           # Google Sheets access through the rclone token
 ├── experiments/             # throwaway proof sheets used to pick the cover and fonts
 ├── examples/
 │   └── book-template.json   # book template: style prompt, pages, copyright
@@ -148,10 +169,10 @@ coloring-book-factory/
 |---|---|
 | Language | Python 3 standard library + Pillow |
 | Images | OpenAI Images API (`gpt-image-2`) |
-| Agents | Codex CLI in read-only mode, JSON-schema outputs |
-| Market data | Apify actors |
+| Agents | Codex CLI in read-only mode, JSON-schema outputs; Gemini, Groq and Z.ai as backups |
+| Market data | Apify actors, SerpApi as backup |
 | Files and reporting | rclone + Google Drive + Google Sheets API |
-| Marketplace draft | Etsy Open API v3 |
+| Sales drafts | Gumroad CLI, Etsy Open API v3 |
 | Scheduling | macOS launchd |
 
 ## Local run

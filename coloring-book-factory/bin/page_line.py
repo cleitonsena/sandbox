@@ -13,7 +13,7 @@ from PIL import Image
 
 BIN = os.path.expanduser("~/books/bin")
 MAX_ATTEMPTS = 3
-IMG_COST = 0.02  # measured 2026-11-21: US$ 0.06 for 3 images
+IMG_COST = 0.0065  # OpenAI invoice 25 Nov 2026: US$ 1.10 / ~175 images (approved 25 Nov, rule 0016)
 PRINT_SIDE = 2550  # 8.5 in x 300 dpi
 
 folder = os.path.abspath(sys.argv[1]) if not sys.argv[1].startswith("--") else os.getcwd()
@@ -84,13 +84,18 @@ def reviewer(path, theme):
     f_schema = os.path.join(folder, "reviewer-schema.json")
     json.dump(SCHEMA, open(f_schema, "w"))
     f_out = path + ".review.json"
+    # Cleiton, 25 Nov 2026: the reviewer enforces the cover promise (title + subtitle), otherwise the book promises one thing and delivers another
+    L_ = globals().get("book") or json.load(open(os.path.join(folder, "book.json")))
+    promise = (L_.get("title", "") + ": " + L_.get("subtitle", "")).strip(": ") or "bold and easy"
     request = (
         "You are the quality reviewer of an adult coloring book (cozy, bold and easy style). "
         f"Look at the attached page. Intended theme: {theme}. "
         "A DEFECT is only one of these: 1) theme not recognisable; 2) gray shading or filled areas instead of outlines; "
         "3) any text, letters, numbers or watermark; 4) deformed hands, faces, animals or objects; "
         "5) many areas too tiny to color with a fine marker; 6) a border or frame around the page; "
-        "7) main objects cut off by the page edge; 8) anything resembling a known brand, logo or copyrighted character. "
+        "7) main objects cut off by the page edge; 8) anything resembling a known brand, logo or copyrighted character; "
+        f"9) the page breaks the promise printed on the cover ({promise}): for bold and easy that means thin lines, "
+        "busy patterns, lots of small shapes or more detail than can be colored in one relaxed sitting. "
         "Everything else (could be simpler, could be nicer) is a SUGGESTION, not a defect. "
         "Be fair: a clean, usable page with no defects must pass even if it could be improved. "
         "Score 1-10. Write each defect and suggestion as a short instruction in English for the illustrator. "
@@ -135,6 +140,8 @@ if sys.argv[1] == "--review":  # tests only the reviewer: --review FOLDER IMG "t
     sys.exit(0)
 book = json.load(open(os.path.join(folder, "book.json")))
 
+NO_FRAME = (" No border, no frame, no arch, no rounded or rectangular outline enclosing the scene or the page; "
+            "the drawing ends in open white space.")
 for pg in book["pages"]:
     st = state.setdefault(pg["id"], {"state": "pending", "attempts": []})
     if st["state"] in ("approved", "human_queue"):
@@ -145,6 +152,14 @@ for pg in book["pages"]:
     while len(st["attempts"]) < MAX_ATTEMPTS:
         n = len(st["attempts"]) + 1
         prompt = book["style"].format(theme=pg["theme"])
+        # Improvements approved by Cleiton on 23 Nov 2026 (retro of Cozy Little Corners):
+        # (2) mascot described with the same text on every page (the 50 redone pages had a different cat)
+        if book.get("mascot"):
+            prompt += (f" The recurring character must look exactly the same on every page: {book['mascot']}. "
+                       "Same size, body shape, markings and face.")
+        # (1) no frames (most common rejection reason in book 1)
+        if "no border" not in prompt.lower():
+            prompt += NO_FRAME
         if corrections:
             prompt += " Important corrections: " + "; ".join(dict.fromkeys(corrections)) + "."
         img = os.path.join(folder, "attempts", f"{pg['id']}-t{n}.png")

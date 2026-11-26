@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+ <key>Label</key><string>com.example.carousels</string>
+ <key>ProgramArguments</key><array>
+  <string>/usr/bin/python3</string><string>/Users/YOU/company/projects/posters/carousel_auto.py</string><string>cycle</string></array>
+ <key>WorkingDirectory</key><string>/Users/YOU/company/projects/posters</string>
+ <key>StartInterval</key><integer>900</integer>
+ <key>StandardOutPath</key><string>/Users/YOU/prototypes/posters/auto/launchd.log</string>
+ <key>StandardErrorPath</key><string>/Users/YOU/prototypes/posters/auto/launchd.log</string>
+</dict></plist>

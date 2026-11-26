@@ -150,6 +150,7 @@ coloring-book-factory/
 │   ├── promote.py           # sales kit: images, copy, Gumroad + Etsy drafts, Pinterest pins
 │   ├── etsy_oauth.py        # one-time Etsy OAuth 2.0 + PKCE login
 │   ├── etsy_draft.py        # Etsy listing DRAFT; no publish call
+│   ├── pinterest.py         # Pinterest OAuth 2.0 login + manual pin publishing (not run by the factory)
 │   ├── sales.py             # Gumroad sales log, one row per sale
 │   ├── watchdog.py          # no-AI health checks and alerts
 │   ├── spreadsheet.py       # one-row-per-book reporting sheet
@@ -172,7 +173,7 @@ coloring-book-factory/
 | Agents | Codex CLI in read-only mode, JSON-schema outputs; Gemini, Groq and Z.ai as backups |
 | Market data | Apify actors, SerpApi as backup |
 | Files and reporting | rclone + Google Drive + Google Sheets API |
-| Sales drafts | Gumroad CLI, Etsy Open API v3 |
+| Sales drafts | Gumroad CLI, Etsy Open API v3, Pinterest API v5 (manual publish) |
 | Scheduling | macOS launchd |
 
 ## Local run
